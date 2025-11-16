@@ -15,11 +15,11 @@ AC_PROG_RANLIB
 # Checks for header files.
 AC_LANG([C++])
 
-AC_ARG_WITH(bamtools,
-        AS_HELP_STRING([--with-bamtools=DIR], [specify directory containing the bamtools library (http://github.com/pezmaster31/bamtools)]),
+AC_ARG_WITH(htslib,
+        AS_HELP_STRING([--with-htslib=DIR], [specify directory containing the htslib library]),
         [ if test -d "$withval" ; then
-            bamtools_ldflags="-Wl,-rpath,$withval/lib -L$withval/lib -Wl,-rpath,$withval/lib/bamtools -L$withval/lib/bamtools"
-    		bamtools_include="-I$withval/include -I$withval/include/bamtools"
+            htslib_ldflags="-Wl,-rpath,$withval/lib -L$withval/lib"
+    		htslib_include="-I$withval/include"
 		else
           	AC_MSG_ERROR([Cannot stat directory $withval])
       	fi ]
@@ -34,21 +34,21 @@ AC_SUBST(AM_CXXFLAGS, "-Wall -Wextra -Wno-unknown-pragmas -g -O0")
 AC_SUBST(CXXFLAGS, "-std=c++11")
 AC_SUBST(CFLAGS, "-std=c++11")
 
-AC_SUBST(CPPFLAGS, "$CPPFLAGS $bamtools_include $gzstream_include")
-AC_SUBST(LDFLAGS, "$bamtools_ldflags $gzstream_ldflags $LDFLAGS")
+AC_SUBST(CPPFLAGS, "$CPPFLAGS $htslib_include $gzstream_include")
+AC_SUBST(LDFLAGS, "$htslib_ldflags $gzstream_ldflags $LDFLAGS")
 
 #AC_MSG_NOTICE(["CPPFLAGS is $CPPFLAGS"])
 #AC_MSG_NOTICE(["LDFLAGS is $LDFLAGS"])
 
-# We always need to specify to link in bamtools
-AC_SUBST(LIBS, "$LIBS -lbamtools -lz")
+# We always need to specify to link in htslib
+AC_SUBST(LIBS, "$LIBS -lhts -lz")
 
 #AC_MSG_NOTICE(["LIBS is $LIBS"])
 
-# Make sure the bamtools headers can be found
-AC_CHECK_HEADER([api/BamReader.h],,[AC_MSG_ERROR(
-[The bamtools library must be installed (http://github.com/pezmaster31/bamtools). \
-You can specify its path with the --with-bamtools=PATH option])])
+# Make sure the htslib headers can be found
+AC_CHECK_HEADER([htslib/sam.h],,[AC_MSG_ERROR(
+[The htslib library must be installed. \
+You can specify its path with the --with-htslib=PATH option])])
 
 AC_CONFIG_FILES([Makefile
 		Util/Makefile

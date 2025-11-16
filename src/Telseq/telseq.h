@@ -130,6 +130,7 @@ double calcGC(const std::string& seq);
 int countMotif(std::string &read, std::string pattern, std::string pattern_revcomp);
 double calcTelLength(ScanResults results);
 int scanBam();
+std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, bool isExome);
 int outputresults(std::vector< std::map<std::string, ScanResults> > );
 void printlog(std::vector< std::map<std::string, ScanResults> > resultlist);
 void printout(std::string, ScanResults, std::ostream*);

@@ -1,0 +1,70 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Compiled binaries (specific paths only)
+src/Telseq/telseq
+src/Telseq/*.o
+!src/Telseq/*.cpp
+!src/Telseq/*.h
+!src/Telseq/Makefile.am
+
+# Autotools generated files (keep source .am and .ac files)
+Makefile
+Makefile.in
+!src/Makefile.am
+!src/*/Makefile.am
+.deps/
+.dirstamp
+*.log
+*.status
+stamp-h1
+autom4te.cache/
+aclocal.m4
+compile
+config.guess
+config.h.in
+config.h
+config.log
+config.status
+config.sub
+configure
+configure~
+depcomp
+install-sh
+libtool
+ltmain.sh
+missing
+m4/
+
+# Keep source configure.ac and autogen.sh
+!src/configure.ac
+!src/autogen.sh
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+compile_commands.json
+
+# Test data and outputs
+*.bam
+*.bai
+*.cram
+*.crai
+test_*.sh
+
+# Dependency directories
+bin/
+
+# Distribution tarballs
+*.tar.gz
+*.tar.bz2
+*.zip
