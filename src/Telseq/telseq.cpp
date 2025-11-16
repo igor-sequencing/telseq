@@ -50,7 +50,6 @@ static const char *TELSEQ_USAGE_MESSAGE =
 "   -i, --bam-index=STR      URL to BAM index file (.bai). Required when using -T > 1 with S3/HTTP URLs. \n"
 "                            For local files, index is auto-detected. For URLs, you must specify the index URL.\n"
 "   -o, --output_dir=STR     output file for results. Ignored when input is from stdin, in which case output will be stdout. \n"
-"   -t, --threads=INT        number of threads for parallel BAM processing (DEPRECATED: use -j and -T instead). default = 1.\n"
 "   -j, --jobs=INT           max number of BAM files to process in parallel. 0 = auto-detect cores. default = 0.\n"
 "   -T, --threads-per-file=INT  number of threads for processing reads within each BAM file (requires BAM index). default = 1.\n"
 "   -H                       remove header line, which is printed by default.\n"
@@ -87,7 +86,6 @@ namespace opt
     static std::string unknown = "UNKNOWN";
     static std::string PATTERN;
     static std::string PATTERN_REV;
-    static unsigned int num_threads = 1; // number of threads for parallel processing (deprecated, use threads_per_file)
     static unsigned int parallel_files = 0; // max number of BAM files to process in parallel (0 = auto)
     static unsigned int threads_per_file = 1; // number of threads per BAM file for read processing
 
@@ -104,7 +102,7 @@ bool isURL(const std::string& path) {
             path.find("s3://") == 0);
 }
 
-static const char* shortopts = "f:o:i:k:z:e:r:p:t:j:T:HhvmuwU";
+static const char* shortopts = "f:o:i:k:z:e:r:p:j:T:HhvmuwU";
 
 enum { OPT_HELP = 1, OPT_VERSION };
 
@@ -113,7 +111,6 @@ static const struct option longopts[] = {
     { "output-dir",		optional_argument, NULL, 'o' },
     { "bam-index",      optional_argument, NULL, 'i' },
     { "exomebed",		optional_argument, NULL, 'e' },
-    { "threads",		optional_argument, NULL, 't' },
     { "jobs",           optional_argument, NULL, 'j' },
     { "threads-per-file", optional_argument, NULL, 'T' },
     { "help",               no_argument,       NULL, OPT_HELP },
@@ -759,14 +756,6 @@ int scanBam()
   unsigned int parallel_files = opt::parallel_files;
   unsigned int max_threads = std::thread::hardware_concurrency();
 
-  // Handle backward compatibility with -t option
-  if (opt::num_threads > 1 && parallel_files == 0 && opt::threads_per_file == 1) {
-    // Old behavior: -t was used for file-level parallelism
-    parallel_files = opt::num_threads;
-    std::cerr << "Note: -t option is deprecated. Using -j " << parallel_files
-              << " for file-level parallelism.\n";
-  }
-
   // Auto-detect if parallel_files is 0
   if (parallel_files == 0) {
     parallel_files = max_threads > 0 ? max_threads : 1;
@@ -1095,13 +1084,6 @@ void parseScanOptions(int argc, char** argv)
         		exit(EXIT_SUCCESS);
             case 'k':
             	arg >> opt::tel_k;
-            	break;
-            case 't':
-            	arg >> opt::num_threads;
-            	if(opt::num_threads < 1){
-            		std::cerr << "Number of threads must be at least 1\n";
-            		exit(EXIT_FAILURE);
-            	}
             	break;
             case 'j':
             	arg >> opt::parallel_files;
