@@ -1,13 +1,20 @@
-TelSeq is a software that estimates telomere length from
-whole genome sequencing data (BAMs).
+# TelSeq - Enhanced Fork with S3/HTTP Streaming Support
 
-The most current development version is available from our
-git repository:
-[git://github.com/zd1/telseq.git](git://github.com/zd1/telseq.git)
+TelSeq is a software that estimates telomere length from whole genome sequencing data (BAMs).
 
-The software is implemented in C++.
+This is an enhanced fork with the following improvements:
+- **S3/HTTP URL streaming support** with explicit BAM index URLs
+- **Chromosome-level parallelization** for faster processing
+- **Fixed critical parallel processing bug** that caused incorrect read counts
+- Uses **htslib** instead of BamTools for better URL support and compatibility
 
-Citation:
+## Original Project
+
+This fork is based on the original TelSeq by Zhihao Ding:
+- Original repository: [https://github.com/zd1/telseq](https://github.com/zd1/telseq)
+- This fork: [https://github.com/igor-sequencing/telseq](https://github.com/igor-sequencing/telseq)
+
+### Citation
 
 _Estimating telomere length from whole genome sequence data_
 
@@ -15,143 +22,336 @@ Zhihao Ding; Massimo Mangino; Abraham Aviv; Tim Spector; Richard Durbin.
 Nucleic Acids Research 2014; doi: 10.1093/nar/gku181
 [http://nar.oxfordjournals.org/content/42/9/e75](http://nar.oxfordjournals.org/content/42/9/e75)
 
+## What's New in This Fork
 
-## Compile TelSeq
+### Bug Fixes
+- **Fixed parallel processing bug**: In the original implementation, when using multi-threading, read counts were incorrectly multiplied by the number of threads due to accumulated results being passed to each thread.
 
-### TelSeq dependency:
-- the bamtools library (https://github.com/pezmaster31/bamtools)
+### New Features
+- **S3/HTTP URL streaming**: Process BAM files directly from S3 or HTTP URLs without downloading
+- **Explicit BAM index URLs**: Use `-i/--bam-index` to specify the .bai file URL separately (required for presigned URLs)
+- **Chromosome-level parallelization**: Use `-T/--threads-per-file` to process chromosomes in parallel within each BAM file
+- **File-level parallelization**: Use `-j/--jobs` to process multiple BAM files in parallel
+- **Unmapped-only mode**: Use `-U` to quickly process only unmapped reads and exit
 
-- A modern version of GCC (version 4.8 or above)
-This can been seen by "gcc --version".
-If multiple GCCs are installed in your system, please set environmental
-variables pointing to the one of version 4.8 or above. e.g. in bash,
+### Migration Notes
+- The deprecated `-t/--threads` option has been removed
+- Use `-j/--jobs` for file-level parallelism (processing multiple BAMs concurrently)
+- Use `-T/--threads-per-file` for read-level parallelism (processing chromosomes within a BAM concurrently)
 
-```
-export CXX=/path/to/gcc/gcc-4.8.1/bin/g++
-export CC=/path/to/gcc/gcc-4.8.1/bin/gcc
-```
+## Dependencies
 
-One easy way to install a new GCC is to use homebrew,
+### Required
+- **htslib** (version 1.10 or later) - replaces the BamTools dependency
+  ```bash
+  # macOS
+  brew install htslib
 
-```
-# install homebrew if you don't have it
-ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
+  # Ubuntu/Debian
+  apt-get install libhts-dev
 
-# install GCC
-brew install gcc
-```
+  # From source
+  git clone https://github.com/samtools/htslib.git
+  cd htslib
+  make && make install
+  ```
 
+- **Modern C++ compiler** (GCC 4.8+ or Clang with C++11 support)
+  ```bash
+  # macOS
+  brew install gcc
 
-### Compile
-Go to the src directory and run autogen.sh from the src directory to generate the configure file
-`./autogen.sh`
-Then run
-```
+  # Ubuntu/Debian
+  apt-get install build-essential
+  ```
+
+- **Autotools** (automake, autoconf)
+  ```bash
+  # macOS
+  brew install automake autoconf
+
+  # Ubuntu/Debian
+  apt-get install automake autoconf
+  ```
+
+## Compilation
+
+### Quick Start
+
+```bash
+cd src
+./autogen.sh
 ./configure
 make
 ```
 
-The executable binary will be at src/Telseq/telseq.
-If bamtools are installed not at the system location, you can
-specify their location by
+The executable binary will be at `src/Telseq/telseq`.
 
-`./configure  --with-bamtools=/path/to/bamtools`
+### Custom htslib Location
 
-The /path/to/bamtools directory is the directory that contains 'lib' and 'include' sub directories.
+If htslib is installed in a non-standard location:
 
-## Run TelSeq
-
-##### Read options and usage information
-`telseq`
-
-##### Analyse one or more BAMs by specifying BAM file path as command line arguments.
-`telseq a.bam b.bam`
-
-##### Analyse a list of BAMs whose paths are specified in a 'bamlist' file.
-bamlist should contain only 1 column with each row the path of a BAM. i.e.
-
+```bash
+./configure --with-htslib=/path/to/htslib
+make
 ```
-/path/to/a.bam
-/path/to/b.bam
+
+The `/path/to/htslib` directory should contain `lib` and `include` subdirectories.
+
+### Specify Compiler
+
+If you need to use a specific compiler:
+
+```bash
+export CXX=/path/to/g++
+export CC=/path/to/gcc
+./configure
+make
 ```
-`telseq -f bamlist`
 
-##### BAM file path can also be provided by piping in a 'bamlist', whose format must be same as above
-`cat bamlist | telseq`
+## Usage
 
+### Basic Usage
 
-##### output
-By default the result will be printed out to stdout. To change it to a file, use '-o'
-option to specify a file path. i.e.
+```bash
+# Analyze local BAM files
+telseq sample1.bam sample2.bam
 
-`telseq -o /path/to/output a.bam b.bam c.bam`
+# Analyze BAMs listed in a file
+telseq -f bamlist.txt
 
-This can also be achived by just direct the output to a file using '>', i.e.
+# From pipe
+cat bamlist.txt | telseq
+```
 
-`telseq a.bam b.bam c.bam > /path/to/output`
+### S3/HTTP URL Streaming (NEW)
 
-The software will print out running status to stderr as well. To separate them from stdout, one
-could direct log to a file, ie.
+Process BAM files directly from URLs without downloading:
 
-`telseq a.bam b.bam c.bam 2>outputlog`
+```bash
+# With auto-detected index (for public URLs with standard .bai naming)
+telseq https://example.com/sample.bam
 
-Merge results from read groups by taking a weighted mean. However, it is benetifical run without
--m to output the result per lane, so to have an idea about inter-lane variation. The merging
-can be done afterwards.
-`telseq -m a.bam > output`
+# With explicit index URL (required for presigned URLs)
+telseq -i https://example.com/sample.bam.bai https://example.com/sample.bam
 
-#### Output file format
+# S3 presigned URLs (BAM and BAI must be specified separately)
+telseq -i "https://bucket.s3.region.amazonaws.com/sample.bam.bai?..." \
+       "https://bucket.s3.region.amazonaws.com/sample.bam?..."
+```
 
-|  Column | Definitions |
-| -------------|----------------------------------------------|
-| ReadGroup | read group, Defined by the RG tag in BAM header. |
-| Library   | sequencing library that the read group belongs to.|
-| Sample    | defined by the SM tag in BAM header. |
-| Total     | total number of reads in this read group. |
-| Mapped    | total number of mapped reads, SAM flag 0x4. |
-| Duplicates | total number of duplicate reads, SAM flag 0x400. |
-| LENGH_ESTIMATE | estimated telomere length. |
-| TEL0 | read counts for reads containing no TTAGGG/CCCTAA repeats. |
-| TEL1 | read counts for reads containing only 1 TTAGGG/CCCTAA repeats. |
-| TELn | read counts for reads containing only n TTAGGG/CCCTAA repeats. |
-| TEL16 | read counts for reads containing 16 TTAGGG/CCCTAA repeats. |
-| GC0 | read counts for reads with GC between 40%-42%. |
-| GC1 | read counts for reads with GC between 42%-44%. |
-| GCn | read counts for reads with GC between (40%+n*2%)-(42%+(n+1)*2%). |
-| GC9 | read counts for reads with GC between 58%-60%.  |
+### Parallel Processing (NEW)
 
-By default for each BAM a header line will be printed out. This can be suppressed by using the '-H' option. It is useful when one has multiple BAMs to scan and wish the output to be merged together. i.e.
+```bash
+# Process multiple BAM files in parallel (file-level parallelism)
+telseq -j 4 sample1.bam sample2.bam sample3.bam sample4.bam
 
-`telseq -H a.bam b.bam c.bam > myresult`
+# Process chromosomes in parallel within each BAM (read-level parallelism)
+# Requires BAM index (.bai file)
+telseq -T 8 sample.bam
 
-To just print out the header, use '-h' option. i.e.
+# Combine both: process 2 BAMs concurrently, using 4 threads per BAM
+telseq -j 2 -T 4 sample1.bam sample2.bam
 
-`telseq -h`
+# Auto-detect number of cores
+telseq -j 0 sample1.bam sample2.bam  # -j 0 uses all available cores
+```
+
+### Quick Unmapped Read Analysis (NEW)
+
+Process only unmapped reads for quick telomere length estimation:
+
+```bash
+# Requires BAM index
+telseq -U sample.bam
+
+# Works with URLs too
+telseq -U -i "https://example.com/sample.bam.bai" "https://example.com/sample.bam"
+```
+
+### Output Options
+
+```bash
+# Write to file
+telseq -o output.tsv sample.bam
+
+# Or redirect stdout
+telseq sample.bam > output.tsv 2> log.txt
+
+# Suppress header (useful when combining multiple outputs)
+telseq -H sample1.bam sample2.bam > combined.tsv
+
+# Print header only
+telseq -h > header.tsv
+```
+
+### Read Group Handling
+
+```bash
+# Ignore read groups (treat all reads as one sample)
+telseq -u sample.bam
+
+# Merge read groups (weighted average)
+telseq -m sample.bam
+```
+
+## Command Line Options
+
+### Input/Output
+- `-f, --bamlist=FILE` - File containing list of BAM paths (one per line)
+- `-o, --output-dir=FILE` - Output file (default: stdout)
+- `-i, --bam-index=URL` - URL to BAM index file (.bai), required for S3/HTTP URLs with -T > 1
+
+### Parallelization (NEW)
+- `-j, --jobs=INT` - Max number of BAM files to process in parallel (0 = auto-detect cores, default: 0)
+- `-T, --threads-per-file=INT` - Number of threads for processing reads within each BAM file (requires BAM index, default: 1)
+
+### Analysis Options
+- `-U` - Process ONLY unmapped reads and exit (requires BAM index, useful for quick analysis)
+- `-u` - Ignore read groups (treat all reads as one sample)
+- `-m` - Merge read groups (weighted average)
+- `-k INT` - Threshold for telomeric repeats (default: 7)
+- `-e, --exomebed=FILE` - Exclude exome regions in BED format
+
+### Output Formatting
+- `-H` - Remove header line
+- `-h` - Print header line only
+- `--help` - Display full help message
+- `--version` - Display version information
+
+### Advanced Options
+- `-r INT` - Read length (default: 100)
+- `-z PATTERN` - Use custom pattern for searching (e.g., TTAGGG)
+- `-w` - Consider all BAMs as one single BAM
+
+## Output Format
+
+| Column | Definition |
+|--------|------------|
+| ReadGroup | Read group ID from BAM header (RG tag) |
+| Library | Sequencing library from BAM header (LB tag) |
+| Sample | Sample name from BAM header (SM tag) |
+| Total | Total number of reads |
+| Mapped | Number of mapped reads (SAM flag 0x4) |
+| Duplicates | Number of duplicate reads (SAM flag 0x400) |
+| LENGTH_ESTIMATE | Estimated telomere length (in kb) |
+| TEL0-TEL16 | Read counts by number of TTAGGG/CCCTAA repeats |
+| GC0-GC9 | Read counts by GC content (40%-60% in 2% bins) |
+
+## Examples
+
+### Example 1: Local BAM Files
+
+```bash
+# Simple analysis
+telseq sample.bam
+
+# Multiple files with parallel processing
+telseq -j 4 -T 2 sample1.bam sample2.bam sample3.bam sample4.bam
+```
+
+### Example 2: S3 Streaming
+
+```bash
+# Public S3 bucket
+telseq https://s3.amazonaws.com/bucket/sample.bam
+
+# Presigned S3 URLs (common in production environments)
+BAM_URL="https://bucket.s3.region.amazonaws.com/sample.bam?AWSAccessKeyId=...&Signature=..."
+BAI_URL="https://bucket.s3.region.amazonaws.com/sample.bam.bai?AWSAccessKeyId=...&Signature=..."
+telseq -i "$BAI_URL" "$BAM_URL" -T 4
+```
+
+### Example 3: Quick Analysis with Unmapped Reads
+
+```bash
+# Fast telomere length estimation using only unmapped reads
+telseq -U -u sample.bam
+
+# With S3 streaming
+telseq -U -u -i "$BAI_URL" "$BAM_URL"
+```
+
+### Example 4: Batch Processing
+
+```bash
+# Create BAM list
+ls /data/*.bam > bamlist.txt
+
+# Process all BAMs in parallel
+telseq -j 0 -f bamlist.txt -o results.tsv
+```
+
+## Performance Tips
+
+1. **Use parallel processing**: `-j` and `-T` can significantly speed up processing
+   - `-j` for multiple files (I/O bound)
+   - `-T` for large files (CPU bound)
+
+2. **For quick estimates**: Use `-U` to process only unmapped reads (~10-100x faster)
+
+3. **S3 streaming**:
+   - Always use `-i` to specify the index URL explicitly for presigned URLs
+   - Use `-T` for parallel chromosome processing when streaming from S3
+   - Consider network bandwidth when choosing thread count
+
+4. **Memory usage**: Higher thread counts use more memory (each thread opens the BAM independently)
 
 ## Docker
 
-### Install Docker
+### Build Docker Image
 
-Please refer to the official website for installing Docker
-[https://docs.docker.com/engine/installation/](https://docs.docker.com/engine/installation/)
-
-
-### Build telseq Docker image
-
-```
-docker build -t telseq-docker github.com/zd1/telseq
+```bash
+docker build -t telseq-docker github.com/igor-sequencing/telseq
 ```
 
-### Run telseq
+### Run with Docker
 
-Note that the sample path "/path/to/bam/sample.bam" in the machine
-that the container is run needs to be specified. "/sample.bam" doesn't
-need to be changed.
+```bash
+# Local BAM file
+docker run -v /path/to/bam:/data telseq-docker /data/sample.bam
 
+# With URL (no volume mount needed)
+docker run telseq-docker https://example.com/sample.bam
 ```
-docker run -v /path/to/bam/sample.bam:/sample.bam telseq-docker /sample.bam
+
+## Troubleshooting
+
+### BAM Index Not Found
 ```
+Warning: BAM index (.bai) not found
+```
+**Solution**: When using URLs, explicitly specify the index with `-i`:
+```bash
+telseq -i https://example.com/sample.bam.bai https://example.com/sample.bam
+```
+
+### Incorrect Read Counts (Old Bug - Fixed)
+If using an older version of telseq with multi-threading, read counts may be multiplied by the number of threads. **This bug has been fixed in this fork.**
+
+### Compilation Errors
+```
+fatal error: htslib/sam.h: No such file or directory
+```
+**Solution**: Install htslib or specify its location:
+```bash
+./configure --with-htslib=/path/to/htslib
+```
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit pull requests or open issues at:
+[https://github.com/igor-sequencing/telseq](https://github.com/igor-sequencing/telseq)
+
+## License
+
+See LICENSE file for details.
 
 ## Contact
 
-zhihao.ding at gmail.com
+For issues specific to this fork:
+- GitHub Issues: [https://github.com/igor-sequencing/telseq/issues](https://github.com/igor-sequencing/telseq/issues)
+
+For the original TelSeq project:
+- Original author: zhihao.ding at gmail.com
+- Original repository: [https://github.com/zd1/telseq](https://github.com/zd1/telseq)
