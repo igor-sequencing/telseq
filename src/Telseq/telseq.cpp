@@ -485,63 +485,49 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
 	}
   }
 
-  // Determine if we should use chromosome-level parallel processing
+  // Always use parallel chromosome processing (indexed BAM required)
   unsigned int threads_per_chrom = opt::threads_per_file;
-  bool use_parallel_chroms = (threads_per_chrom > 1) || opt::unmappedonly;
 
-  // Save n_targets and chromosome names BEFORE checking index or closing anything
+  // Save n_targets and chromosome names
   int n_targets = header->n_targets;
   std::vector<std::string> chr_names;
-  if (use_parallel_chroms) {
-    chr_names.reserve(n_targets);
-    for (int i = 0; i < n_targets; i++) {
-      chr_names.push_back(std::string(header->target_name[i]));
-    }
+  chr_names.reserve(n_targets);
+  for (int i = 0; i < n_targets; i++) {
+    chr_names.push_back(std::string(header->target_name[i]));
   }
 
-  // Check if BAM index is available (do this with the header still open)
+  // Check if BAM index is available (required for parallel processing)
   hts_idx_t* test_idx = NULL;
-  if (use_parallel_chroms) {
-    if (!opt::bamindexurl.empty()) {
-      test_idx = sam_index_load2(sam_fp, bampath.c_str(), opt::bamindexurl.c_str());
-    } else {
-      test_idx = sam_index_load(sam_fp, bampath.c_str());
-    }
-
-    if (test_idx == NULL) {
-      std::lock_guard<std::mutex> lock(output_mutex);
-      std::cerr << "Warning: BAM index (.bai) not found for " << bampath << "\n";
-      if (!opt::bamindexurl.empty()) {
-        std::cerr << "Warning: Explicit index URL was provided: " << opt::bamindexurl << "\n";
-      }
-      std::cerr << "Warning: Chromosome-level parallelization requires indexed BAM files.\n";
-      std::cerr << "Warning: For S3/HTTP URLs, use -i/--bam-index to specify the index URL.\n";
-      std::cerr << "Warning: Falling back to sequential processing (single-threaded).\n";
-      use_parallel_chroms = false;
-    } else {
-      std::lock_guard<std::mutex> lock(output_mutex);
-      std::cerr << "BAM index found. Using " << threads_per_chrom << " threads for chromosome-level parallel processing\n";
-    }
+  if (!opt::bamindexurl.empty()) {
+    test_idx = sam_index_load2(sam_fp, bampath.c_str(), opt::bamindexurl.c_str());
+  } else {
+    test_idx = sam_index_load(sam_fp, bampath.c_str());
   }
 
-  // Don't destroy anything here - let child threads handle their own resources
-  // For sequential processing, resources will be cleaned up at the end of the function
-
-  if (!use_parallel_chroms) {
+  if (test_idx == NULL) {
     std::lock_guard<std::mutex> lock(output_mutex);
-    std::cerr << "Using sequential processing (single thread)\n";
+    std::cerr << "Error: BAM index (.bai) not found for " << bampath << "\n";
+    if (!opt::bamindexurl.empty()) {
+      std::cerr << "Error: Explicit index URL was provided: " << opt::bamindexurl << "\n";
+    }
+    std::cerr << "Error: BAM index is required. Please index your BAM file using 'samtools index'.\n";
+    std::cerr << "Error: For S3/HTTP URLs, use -i/--bam-index to specify the index URL.\n";
+    sam_hdr_destroy(header);
+    sam_close(sam_fp);
+    return resultmap;
   }
 
-  // Process chromosomes in parallel or sequentially
-  if (use_parallel_chroms) {
-    // Parallel chromosome processing
-    // Note: n_targets and chr_names were already saved above, header and sam_fp already closed
+  {
+    std::lock_guard<std::mutex> lock(output_mutex);
+    std::cerr << "BAM index found. Using " << threads_per_chrom << " threads for chromosome-level parallel processing\n";
+  }
 
-    {
-      std::lock_guard<std::mutex> lock(output_mutex);
-      std::cerr << "Found " << n_targets << " chromosomes/contigs in BAM header\n";
-      std::cerr << "Processing chromosomes in parallel with " << threads_per_chrom << " threads\n";
-    }
+  // Parallel chromosome processing
+  {
+    std::lock_guard<std::mutex> lock(output_mutex);
+    std::cerr << "Found " << n_targets << " chromosomes/contigs in BAM header\n";
+    std::cerr << "Processing chromosomes in parallel with " << threads_per_chrom << " threads\n";
+  }
 
     // Process chromosomes in batches to limit concurrent threads
     std::vector<std::future<std::map<std::string, ScanResults>>> chromFutures;
@@ -634,175 +620,14 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
     // Clear the futures vector to free any remaining resources
     chromFutures.clear();
 
-    // Don't clean up main thread's header/sam_fp/test_idx - child threads have their own copies
-    // and htslib may share internal structures. Let OS clean up on process exit.
+  // Don't clean up main thread's header/sam_fp/test_idx - child threads have their own copies
+  // and htslib may share internal structures. Let OS clean up on process exit.
 
-    // Parallel processing complete
-    {
-      std::lock_guard<std::mutex> lock(output_mutex);
-      std::cerr << "Completed scanning BAM\n";
-    }
-    return resultmap;
-  } else {
-    // Sequential processing (original behavior, no parallelization)
-    // Need to reopen the file since we closed it earlier
-    sam_fp = sam_open(bampath.c_str(), "r");
-    if (sam_fp == NULL) {
-      std::lock_guard<std::mutex> lock(output_mutex);
-      std::cerr << "Error: could not reopen BAM file for sequential processing: " << bampath << std::endl;
-      return resultmap;
-    }
-
-    header = sam_hdr_read(sam_fp);
-    if (header == NULL) {
-      std::lock_guard<std::mutex> lock(output_mutex);
-      std::cerr << "Error: could not read BAM header for sequential processing\n";
-      sam_close(sam_fp);
-      return resultmap;
-    }
-
-    bam1_t* b = bam_init1();
-    int nprocessed = 0;
-    int ntotal = 0;
-
-    int ret;
-    while ((ret = sam_read1(sam_fp, header, b)) >= 0) {
-      ntotal++;
-
-      // Extract read group tag
-      std::string tag = opt::unknown;
-      if(rggroups){
-        uint8_t* rg_tag = bam_aux_get(b, "RG");
-        if(rg_tag != NULL){
-          tag = std::string(bam_aux2Z(rg_tag));
-        }else{
-          {
-            std::lock_guard<std::mutex> lock(output_mutex);
-            std::cerr << "can't find RG tag for read at position {" << b->core.tid << ":" << b->core.pos << "}" << std::endl;
-            std::cerr << "skip this read" << std::endl;
-          }
-          continue;
-        }
-      }
-
-      // skip reads with readgroup not defined in BAM header
-      if(resultmap.find(tag) == resultmap.end()){
-        {
-          std::lock_guard<std::mutex> lock(output_mutex);
-          std::cerr << "RG tag {" << tag << "} for read at position ";
-          std::cerr << "{" << b->core.tid << ":" << b->core.pos << "} doesn't exist in BAM header.";
-        }
-        continue;
-      }
-
-      // for exome, exclude reads mapped to the exome regions.
-      if(isExome){
-        range rg;
-        rg.first = b->core.pos;
-        rg.second = b->core.pos + b->core.l_qseq;
-        std::string chrm =  refID2Name(b->core.tid);
-
-        if(chrm != "-1"){ // check if overlap exome when the read is mapped to chr1-22, X, Y
-          std::map<std::string, std::vector<range> >::iterator chrmit = opt::exomebed.find(chrm);
-          if(chrmit == opt::exomebed.end()) {
-            // unmapped reads can have chr names as a star (*). We also don't consider MT reads.
-            resultmap[tag].n_exreadsChrUnmatched +=1;
-          } else {
-            std::vector<range>::iterator itend = opt::exomebed[chrm].end();
-            std::map<std::string, std::vector<range>::iterator>::iterator lastfoundchrmit = lastfound.find(chrm);
-            if(lastfoundchrmit == lastfound.end()){ // first entry to this chrm
-              lastfound[chrm] = chrmit->second.begin();// start from begining
-            }
-            // set the hint to where the previous found is
-            searchhint = lastfound[chrm];
-            std::vector<range>::iterator itsearch = searchRange(searchhint, itend, rg);
-            // if found
-            if(itsearch != itend){// if found
-              searchhint = itsearch;
-              resultmap[tag].n_exreadsExcluded +=1;
-              lastfound[chrm] = searchhint; // update search hint
-              continue;
-            }
-          }
-        }
-      }
-
-      // Extract sequence
-      std::string queryBases;
-      uint8_t* seq = bam_get_seq(b);
-      for (int i = 0; i < b->core.l_qseq; i++) {
-        queryBases += seq_nt16_str[bam_seqi(seq, i)];
-      }
-
-      // Extract flags
-      bool isMapped = !(b->core.flag & BAM_FUNMAP);
-      bool isDuplicate = (b->core.flag & BAM_FDUP);
-
-      // Process this read
-      resultmap[tag].numTotal +=1;
-
-      if(isMapped) {
-        resultmap[tag].numMapped += 1;
-      }
-
-      if(isDuplicate) {
-        resultmap[tag].numDuplicates +=1;
-      }
-
-      double gc = calcGC(queryBases);
-      int ptn_count = countMotif(queryBases, opt::PATTERN, opt::PATTERN_REV);
-
-      // Dynamically resize telcounts vector if needed for longer reads
-      if (static_cast<size_t>(ptn_count) >= resultmap[tag].telcounts.size()) {
-        resultmap[tag].telcounts.resize(ptn_count + 1, 0);
-      }
-      resultmap[tag].telcounts[ptn_count]+=1;
-
-      if(gc >= ScanParameters::GC_LOWERBOUND && gc <= ScanParameters::GC_UPPERBOUND){
-        // get index for GC bin.
-        int idx = floor((gc-ScanParameters::GC_LOWERBOUND)/ScanParameters::GC_BINSIZE);
-        if(idx >= 0 && idx <= ScanParameters::GC_BIN_N-1 &&
-           static_cast<size_t>(idx) < resultmap[tag].gccounts.size()){
-          resultmap[tag].gccounts[idx]+=1;
-        } else if (idx > ScanParameters::GC_BIN_N-1 || static_cast<size_t>(idx) >= resultmap[tag].gccounts.size()) {
-          std::lock_guard<std::mutex> lock(output_mutex);
-          std::cerr << nprocessed << " GC:{"<< gc << "} telcounts:{"<< ptn_count <<"} GC bin index out of bound:" << idx
-                    << " (max: " << resultmap[tag].gccounts.size()-1 << ")\n";
-        }
-      }
-
-      nprocessed++;
-
-      if( nprocessed%10000000 == 0){
-        {
-          std::lock_guard<std::mutex> lock(output_mutex);
-          std::cerr << "[scan] processed " << nprocessed << " reads \n" ;
-        }
-      }
-    }
-
-    // Clean up
-    bam_destroy1(b);
-
-    {
-      std::lock_guard<std::mutex> lock(output_mutex);
-      std::cerr << "[scan] total reads in BAM scanned " << ntotal << std::endl;
-    }
-  }
-
-  // Only destroy header and close file if they weren't already closed (parallel mode closes them earlier)
-  if (header != NULL) {
-    sam_hdr_destroy(header);
-  }
-  if (sam_fp != NULL) {
-    sam_close(sam_fp);
-  }
-
+  // Parallel processing complete
   {
     std::lock_guard<std::mutex> lock(output_mutex);
     std::cerr << "Completed scanning BAM\n";
   }
-
   return resultmap;
 }
 
