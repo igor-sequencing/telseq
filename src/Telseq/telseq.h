@@ -127,7 +127,7 @@ struct Headers{
 
 void parseScanOptions(int argc, char** argv);
 double calcGC(const std::string& seq);
-int countMotif(std::string &read, std::string pattern, std::string pattern_revcomp);
+int countMotif(const std::string& read, const std::string& pattern, const std::string& pattern_revcomp);
 double calcTelLength(const ScanResults& results);
 int scanBam();
 std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, bool isExome);
