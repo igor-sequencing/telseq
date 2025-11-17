@@ -338,14 +338,8 @@ std::map<std::string, ScanResults> processChromosome(
         int ptn_count = countMotif(queryBases, opt::PATTERN, opt::PATTERN_REV);
 
         // Dynamically resize telcounts vector if needed for longer reads
-        if (ptn_count < 0) {
-            continue;  // Skip invalid negative counts
-        }
-
         if (static_cast<size_t>(ptn_count) >= chromResults[tag].telcounts.size()) {
-            // Resize vector to accommodate this read (add some headroom for efficiency)
-            size_t new_size = ptn_count + 10;
-            chromResults[tag].telcounts.resize(new_size, 0);
+            chromResults[tag].telcounts.resize(ptn_count + 1, 0);
         }
         chromResults[tag].telcounts[ptn_count] += 1;
 
@@ -759,14 +753,8 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
       int ptn_count = countMotif(queryBases, opt::PATTERN, opt::PATTERN_REV);
 
       // Dynamically resize telcounts vector if needed for longer reads
-      if (ptn_count < 0) {
-        continue;  // Skip invalid negative counts
-      }
-
       if (static_cast<size_t>(ptn_count) >= resultmap[tag].telcounts.size()) {
-        // Resize vector to accommodate this read (add some headroom for efficiency)
-        size_t new_size = ptn_count + 10;
-        resultmap[tag].telcounts.resize(new_size, 0);
+        resultmap[tag].telcounts.resize(ptn_count + 1, 0);
       }
       resultmap[tag].telcounts[ptn_count]+=1;
 
