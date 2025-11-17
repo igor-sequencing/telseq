@@ -958,15 +958,16 @@ int countMotif(const std::string& read, const std::string& pattern, const std::s
 
 double calcGC(const std::string& seq)
 {
-    double num_gc = 0.0f;
-    double num_total = 0.0f;
-    for(size_t i = 0; i < seq.size(); ++i)
+    const size_t len = seq.size();
+    if (len == 0) return 0.0;  // Handle empty sequence
+
+    double num_gc = 0.0;
+    for(char c : seq)
     {
-        if(seq[i] == 'C' || seq[i] == 'G')
+        if(c == 'C' || c == 'G')
             ++num_gc;
-        ++num_total;
     }
-    return num_gc / num_total;
+    return num_gc / len;
 }
 
 void update_pattern(){
