@@ -128,12 +128,12 @@ struct Headers{
 void parseScanOptions(int argc, char** argv);
 double calcGC(const std::string& seq);
 int countMotif(std::string &read, std::string pattern, std::string pattern_revcomp);
-double calcTelLength(ScanResults results);
+double calcTelLength(const ScanResults& results);
 int scanBam();
 std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, bool isExome);
 int outputresults(std::vector< std::map<std::string, ScanResults> > );
 void printlog(std::vector< std::map<std::string, ScanResults> > resultlist);
-void printout(std::string, ScanResults, std::ostream*);
+void printout(const std::string&, const ScanResults&, std::ostream*, size_t);
 
 
 //std::ifstream::pos_type getFilesize(const std::string& filename);

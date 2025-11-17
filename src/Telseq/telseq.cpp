@@ -119,7 +119,7 @@ static const struct option longopts[] = {
 };
 
 // combine counts in two ScanResults objects
-void add_results(ScanResults& x, ScanResults& y){
+void add_results(ScanResults& x, const ScanResults& y){
 
     x.numTotal += y.numTotal;
     x.numMapped += y.numMapped;
@@ -128,10 +128,23 @@ void add_results(ScanResults& x, ScanResults& y){
     x.n_exreadsChrUnmatched += y.n_exreadsChrUnmatched;
     x.n_totalunfiltered += y.n_totalunfiltered;
 
-    for (std::size_t j = 0, max = x.telcounts.size(); j != max; ++j){
-        x.telcounts[j] +=y.telcounts[j];
+    // Ensure x vector is large enough to hold all data from y
+    std::size_t max_telcount_size = std::max(x.telcounts.size(), y.telcounts.size());
+    if (x.telcounts.size() < max_telcount_size) {
+        x.telcounts.resize(max_telcount_size, 0);
     }
-    for (std::size_t k = 0, max = x.gccounts.size(); k != max; ++k){
+
+    std::size_t max_gccount_size = std::max(x.gccounts.size(), y.gccounts.size());
+    if (x.gccounts.size() < max_gccount_size) {
+        x.gccounts.resize(max_gccount_size, 0);
+    }
+
+    // Now x is properly sized, iterate through y's actual size and add to x
+    for (std::size_t j = 0; j < y.telcounts.size(); ++j){
+        x.telcounts[j] += y.telcounts[j];
+    }
+
+    for (std::size_t k = 0; k < y.gccounts.size(); ++k){
         x.gccounts[k] += y.gccounts[k];
     }
 
@@ -145,12 +158,12 @@ void merge_results_by_readgroup(
     std::map<std::string, ScanResults> mergedresults;
 
     for(size_t i =0; i< resultlist.size(); i++){
-        auto rmap = resultlist[i];
-        for(std::map<std::string, ScanResults>::iterator it= rmap.begin();
+        const auto& rmap = resultlist[i];
+        for(std::map<std::string, ScanResults>::const_iterator it= rmap.begin();
                 it != rmap.end(); ++it){
 
-            std::string rg = it ->first;
-            ScanResults result = it -> second;
+            const std::string& rg = it ->first;
+            const ScanResults& result = it -> second;
 
             if(mergedresults.find(rg) == mergedresults.end()){
                 mergedresults[rg] = result;
@@ -324,16 +337,23 @@ std::map<std::string, ScanResults> processChromosome(
         double gc = calcGC(queryBases);
         int ptn_count = countMotif(queryBases, opt::PATTERN, opt::PATTERN_REV);
 
-        // when the read length exceeds 100bp, number of patterns might exceed the boundary
-        if (ptn_count > ScanParameters::TEL_MOTIF_N-1) {
-            continue;
+        // Dynamically resize telcounts vector if needed for longer reads
+        if (ptn_count < 0) {
+            continue;  // Skip invalid negative counts
+        }
+
+        if (static_cast<size_t>(ptn_count) >= chromResults[tag].telcounts.size()) {
+            // Resize vector to accommodate this read (add some headroom for efficiency)
+            size_t new_size = ptn_count + 10;
+            chromResults[tag].telcounts.resize(new_size, 0);
         }
         chromResults[tag].telcounts[ptn_count] += 1;
 
         if (gc >= ScanParameters::GC_LOWERBOUND && gc <= ScanParameters::GC_UPPERBOUND) {
             // get index for GC bin.
             int idx = floor((gc-ScanParameters::GC_LOWERBOUND)/ScanParameters::GC_BINSIZE);
-            if (idx >= 0 && idx <= ScanParameters::GC_BIN_N-1) {
+            if (idx >= 0 && idx <= ScanParameters::GC_BIN_N-1 &&
+                static_cast<size_t>(idx) < chromResults[tag].gccounts.size()) {
                 chromResults[tag].gccounts[idx] += 1;
             }
         }
@@ -475,9 +495,19 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
   unsigned int threads_per_chrom = opt::threads_per_file;
   bool use_parallel_chroms = (threads_per_chrom > 1) || opt::unmappedonly;
 
-  // Check if BAM index is available before enabling parallel processing
+  // Save n_targets and chromosome names BEFORE checking index or closing anything
+  int n_targets = header->n_targets;
+  std::vector<std::string> chr_names;
   if (use_parallel_chroms) {
-    hts_idx_t* test_idx = NULL;
+    chr_names.reserve(n_targets);
+    for (int i = 0; i < n_targets; i++) {
+      chr_names.push_back(std::string(header->target_name[i]));
+    }
+  }
+
+  // Check if BAM index is available (do this with the header still open)
+  hts_idx_t* test_idx = NULL;
+  if (use_parallel_chroms) {
     if (!opt::bamindexurl.empty()) {
       test_idx = sam_index_load2(sam_fp, bampath.c_str(), opt::bamindexurl.c_str());
     } else {
@@ -493,13 +523,15 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
       std::cerr << "Warning: Chromosome-level parallelization requires indexed BAM files.\n";
       std::cerr << "Warning: For S3/HTTP URLs, use -i/--bam-index to specify the index URL.\n";
       std::cerr << "Warning: Falling back to sequential processing (single-threaded).\n";
-      use_parallel_chroms = false;  // Disable parallel mode
+      use_parallel_chroms = false;
     } else {
-      hts_idx_destroy(test_idx);  // Clean up test index
       std::lock_guard<std::mutex> lock(output_mutex);
       std::cerr << "BAM index found. Using " << threads_per_chrom << " threads for chromosome-level parallel processing\n";
     }
   }
+
+  // Don't destroy anything here - let child threads handle their own resources
+  // For sequential processing, resources will be cleaned up at the end of the function
 
   if (!use_parallel_chroms) {
     std::lock_guard<std::mutex> lock(output_mutex);
@@ -509,7 +541,7 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
   // Process chromosomes in parallel or sequentially
   if (use_parallel_chroms) {
     // Parallel chromosome processing
-    int n_targets = header->n_targets;
+    // Note: n_targets and chr_names were already saved above, header and sam_fp already closed
 
     {
       std::lock_guard<std::mutex> lock(output_mutex);
@@ -538,17 +570,16 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
     for (const auto& pair : unmappedResult) {
       const std::string& rg = pair.first;
       if (resultmap.find(rg) != resultmap.end()) {
-        add_results(resultmap[rg], const_cast<ScanResults&>(pair.second));
+        add_results(resultmap[rg], pair.second);
       }
     }
     chromFutures.clear();
 
     // If unmapped-only mode, skip chromosome processing
     if (opt::unmappedonly) {
+      // Don't clean up - child threads have their own copies and htslib may share internal structures
       std::lock_guard<std::mutex> lock(output_mutex);
       std::cerr << "Unmapped-only mode: Skipping mapped chromosome processing.\n";
-      sam_hdr_destroy(header);
-      sam_close(sam_fp);
       std::cerr << "Completed scanning BAM (unmapped reads only)\n";
       return resultmap;
     }
@@ -558,7 +589,7 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
     while (tid < n_targets) {
       // Launch up to threads_per_chrom tasks
       while (chromFutures.size() < threads_per_chrom && tid < n_targets) {
-        std::string chr_name = std::string(header->target_name[tid]);
+        std::string chr_name = chr_names[tid];  // Use saved chromosome name
         chromFutures.push_back(std::async(std::launch::async,
             processChromosome, bampath, tid, chr_name, isExome, rggroups, resultmap));
         tid++;
@@ -570,31 +601,72 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
         for (const auto& pair : chromResult) {
           const std::string& rg = pair.first;
           if (resultmap.find(rg) != resultmap.end()) {
-            add_results(resultmap[rg], const_cast<ScanResults&>(pair.second));
+            add_results(resultmap[rg], pair.second);
           }
         }
         chromFutures.erase(chromFutures.begin());
       }
     }
 
-    // Collect results from remaining chromosome threads
+    // Collect results from remaining chromosome threads ONE AT A TIME
+    // to avoid memory issues with many large maps
     {
       std::lock_guard<std::mutex> lock(output_mutex);
       std::cerr << "[scan] Aggregating results from " << chromFutures.size()
                 << " remaining chromosome threads...\n";
     }
 
+    size_t future_idx = 0;
     for (auto& future : chromFutures) {
+      {
+        std::lock_guard<std::mutex> lock(output_mutex);
+        std::cerr << "[scan] Aggregating future " << (future_idx + 1) << " of " << chromFutures.size() << "...\n";
+      }
+
       auto chromResult = future.get();
+
+      // Aggregate results immediately
       for (const auto& pair : chromResult) {
         const std::string& rg = pair.first;
         if (resultmap.find(rg) != resultmap.end()) {
-          add_results(resultmap[rg], const_cast<ScanResults&>(pair.second));
+          add_results(resultmap[rg], pair.second);
         }
       }
+
+      // chromResult will be destroyed here, freeing memory before next iteration
+      future_idx++;
     }
+
+    // Clear the futures vector to free any remaining resources
+    chromFutures.clear();
+
+    // Don't clean up main thread's header/sam_fp/test_idx - child threads have their own copies
+    // and htslib may share internal structures. Let OS clean up on process exit.
+
+    // Parallel processing complete
+    {
+      std::lock_guard<std::mutex> lock(output_mutex);
+      std::cerr << "Completed scanning BAM\n";
+    }
+    return resultmap;
   } else {
     // Sequential processing (original behavior, no parallelization)
+    // Need to reopen the file since we closed it earlier
+    sam_fp = sam_open(bampath.c_str(), "r");
+    if (sam_fp == NULL) {
+      std::lock_guard<std::mutex> lock(output_mutex);
+      std::cerr << "Error: could not reopen BAM file for sequential processing: " << bampath << std::endl;
+      return resultmap;
+    }
+
+    header = sam_hdr_read(sam_fp);
+    if (header == NULL) {
+      std::lock_guard<std::mutex> lock(output_mutex);
+      std::cerr << "Error: could not read BAM header for sequential processing\n";
+      sam_close(sam_fp);
+      return resultmap;
+    }
+
     bam1_t* b = bam_init1();
     int nprocessed = 0;
     int ntotal = 0;
@@ -685,24 +757,30 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
 
       double gc = calcGC(queryBases);
       int ptn_count = countMotif(queryBases, opt::PATTERN, opt::PATTERN_REV);
-      // when the read length exceeds 100bp, number of patterns might exceed the boundary
-      if (ptn_count > ScanParameters::TEL_MOTIF_N-1){
-        continue;
+
+      // Dynamically resize telcounts vector if needed for longer reads
+      if (ptn_count < 0) {
+        continue;  // Skip invalid negative counts
+      }
+
+      if (static_cast<size_t>(ptn_count) >= resultmap[tag].telcounts.size()) {
+        // Resize vector to accommodate this read (add some headroom for efficiency)
+        size_t new_size = ptn_count + 10;
+        resultmap[tag].telcounts.resize(new_size, 0);
       }
       resultmap[tag].telcounts[ptn_count]+=1;
 
       if(gc >= ScanParameters::GC_LOWERBOUND && gc <= ScanParameters::GC_UPPERBOUND){
         // get index for GC bin.
         int idx = floor((gc-ScanParameters::GC_LOWERBOUND)/ScanParameters::GC_BINSIZE);
-        assert(idx >=0 && idx <= ScanParameters::GC_BIN_N-1);
-        if(idx > ScanParameters::GC_BIN_N-1){
-          {
-            std::lock_guard<std::mutex> lock(output_mutex);
-            std::cerr << nprocessed << " GC:{"<< gc << "} telcounts:{"<< ptn_count <<"} GC bin index out of bound:" << idx << "\n";
-          }
-          exit(EXIT_FAILURE);
+        if(idx >= 0 && idx <= ScanParameters::GC_BIN_N-1 &&
+           static_cast<size_t>(idx) < resultmap[tag].gccounts.size()){
+          resultmap[tag].gccounts[idx]+=1;
+        } else if (idx > ScanParameters::GC_BIN_N-1 || static_cast<size_t>(idx) >= resultmap[tag].gccounts.size()) {
+          std::lock_guard<std::mutex> lock(output_mutex);
+          std::cerr << nprocessed << " GC:{"<< gc << "} telcounts:{"<< ptn_count <<"} GC bin index out of bound:" << idx
+                    << " (max: " << resultmap[tag].gccounts.size()-1 << ")\n";
         }
-        resultmap[tag].gccounts[idx]+=1;
       }
 
       nprocessed++;
@@ -723,8 +801,14 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
       std::cerr << "[scan] total reads in BAM scanned " << ntotal << std::endl;
     }
   }
-  sam_hdr_destroy(header);
-  sam_close(sam_fp);
+
+  // Only destroy header and close file if they weren't already closed (parallel mode closes them earlier)
+  if (header != NULL) {
+    sam_hdr_destroy(header);
+  }
+  if (sam_fp != NULL) {
+    sam_close(sam_fp);
+  }
 
   {
     std::lock_guard<std::mutex> lock(output_mutex);
@@ -835,12 +919,12 @@ int scanBam()
 void printlog(std::vector< std::map<std::string, ScanResults> > resultlist){
 
 	for(size_t i =0; i< resultlist.size(); i++){
-		auto rmap = resultlist[i];
-		for(std::map<std::string, ScanResults>::iterator it= rmap.begin();
+		const auto& rmap = resultlist[i];
+		for(std::map<std::string, ScanResults>::const_iterator it= rmap.begin();
 				it != rmap.end(); ++it){
 
-			std::string rg = it ->first;
-			ScanResults result = it -> second;
+			const std::string& rg = it ->first;
+			const ScanResults& result = it -> second;
 			std::cout << "BAM:" << rg << std::endl;
 			std::cout << "	chr ID unmatched reads: " << result.n_exreadsChrUnmatched << std::endl;
 			std::cout << "	exome reads excluded: " << result.n_exreadsExcluded << std::endl;
@@ -850,7 +934,7 @@ void printlog(std::vector< std::map<std::string, ScanResults> > resultlist){
 }
 
 
-void printout(std::string rg, ScanResults result, std::ostream* pWriter){
+void printout(const std::string& rg, const ScanResults& result, std::ostream* pWriter, size_t max_telcounts_size){
 
 	*pWriter << rg << ScanParameters::FIELD_SEP;
 	*pWriter << result.lib << ScanParameters::FIELD_SEP;
@@ -859,24 +943,30 @@ void printout(std::string rg, ScanResults result, std::ostream* pWriter){
 	*pWriter << result.numMapped << ScanParameters::FIELD_SEP;
 	*pWriter << result.numDuplicates << ScanParameters::FIELD_SEP;
 
-	result.telLenEstimate = calcTelLength(result);
-	if(result.telLenEstimate==-1){
+	double telLenEstimate = calcTelLength(result);
+	if(telLenEstimate==-1){
 		std::cerr << "Telomere length estimate unknown. No read was found with telomeric GC composition.\n";
 		*pWriter << opt::unknown << ScanParameters::FIELD_SEP;
-	}else if(result.telLenEstimate>1000000){
+	}else if(telLenEstimate>1000000){
 		std::cerr << "Telomere length estimate unknown. Possibly due to not enough representation of genome.\n";
 		*pWriter << opt::unknown << ScanParameters::FIELD_SEP;
-	}else if(result.telLenEstimate==0){
+	}else if(telLenEstimate==0){
 		std::cerr << "Telomere length estimate unknown. No read contains more than " << opt::tel_k << " telomere repeats.\n";
 		*pWriter << opt::unknown << ScanParameters::FIELD_SEP;
 	}
 	else{
-		*pWriter << result.telLenEstimate << ScanParameters::FIELD_SEP;
+		*pWriter << telLenEstimate << ScanParameters::FIELD_SEP;
 	}
 
-	for (std::size_t j = 0, max = result.telcounts.size(); j != max; ++j){
-		*pWriter << result.telcounts[j] << ScanParameters::FIELD_SEP;
+	// Output ALL telomere counts found, padding with 0 if this result has fewer than max
+	for (size_t j = 0; j < max_telcounts_size; ++j){
+		if (j < result.telcounts.size()) {
+			*pWriter << result.telcounts[j] << ScanParameters::FIELD_SEP;
+		} else {
+			*pWriter << 0 << ScanParameters::FIELD_SEP;
+		}
 	}
+
 	for (std::size_t k = 0, max = result.gccounts.size(); k != max; ++k){
 		*pWriter << result.gccounts[k] << ScanParameters::FIELD_SEP;
 	}
@@ -885,6 +975,16 @@ void printout(std::string rg, ScanResults result, std::ostream* pWriter){
 
 
 int outputresults(std::vector< std::map<std::string, ScanResults> > resultlist){
+
+	// Find maximum telcounts size across all results to determine how many TEL columns to output
+	size_t max_telcounts_size = ScanParameters::TEL_MOTIF_N; // Default minimum
+	for (const auto& resultmap : resultlist) {
+		for (const auto& pair : resultmap) {
+			if (pair.second.telcounts.size() > max_telcounts_size) {
+				max_telcounts_size = pair.second.telcounts.size();
+			}
+		}
+	}
 
 	std::ostream* pWriter;
 	bool tostdout = opt::outputfile.empty() ? true:false;
@@ -895,9 +995,23 @@ int outputresults(std::vector< std::map<std::string, ScanResults> > resultlist){
 	}
 
 	if(opt::writerheader){
-		Headers hd;
-		for(size_t h=0; h<hd.headers.size();h++){
-			*pWriter << hd.headers[h] << ScanParameters::FIELD_SEP;
+		// Generate dynamic headers based on maximum telcounts found
+		*pWriter << ScanParameters::LABEL_RG << ScanParameters::FIELD_SEP;
+		*pWriter << ScanParameters::LABEL_LB << ScanParameters::FIELD_SEP;
+		*pWriter << ScanParameters::LABEL_SAMPLE << ScanParameters::FIELD_SEP;
+		*pWriter << ScanParameters::LABEL_TOTAL << ScanParameters::FIELD_SEP;
+		*pWriter << ScanParameters::LABEL_MAPPED << ScanParameters::FIELD_SEP;
+		*pWriter << ScanParameters::LABEL_DUP << ScanParameters::FIELD_SEP;
+		*pWriter << ScanParameters::LABEL_LEN << ScanParameters::FIELD_SEP;
+
+		// Output TEL headers dynamically based on actual max found
+		for(size_t i=0; i < max_telcounts_size; i++){
+			*pWriter << ScanParameters::LABEL_TEL << i << ScanParameters::FIELD_SEP;
+		}
+
+		// Output GC headers (fixed number)
+		for(int i=0; i<ScanParameters::GC_BIN_N; i++){
+			*pWriter << ScanParameters::LABEL_GC << i << ScanParameters::FIELD_SEP;
 		}
 		*pWriter << "\n";
 	}
@@ -907,16 +1021,16 @@ int outputresults(std::vector< std::map<std::string, ScanResults> > resultlist){
 
 	for(size_t i=0; i < resultlist.size();++i){
 
-		std::map<std::string, ScanResults> resultmap = resultlist[i];
+		const std::map<std::string, ScanResults>& resultmap = resultlist[i];
 
 		// if merge read groups, take weighted average for all measures
 		bool domg = opt::mergerg && resultmap.size() > 1? true:false;
 
-		for(std::map<std::string, ScanResults>::iterator it= resultmap.begin();
+		for(std::map<std::string, ScanResults>::const_iterator it= resultmap.begin();
 				it != resultmap.end(); ++it){
 
-			std::string rg = it ->first;
-			ScanResults result = it -> second;
+			const std::string& rg = it ->first;
+			const ScanResults& result = it -> second;
 
 			if(domg){
 				if(grpnames.size()==0){
@@ -931,6 +1045,14 @@ int outputresults(std::vector< std::map<std::string, ScanResults> > resultlist){
 				mergedrs.numDuplicates += result.numDuplicates * result.numTotal;
 				mergedrs.telLenEstimate += calcTelLength(result)* result.numTotal;
 
+				// Ensure mergedrs vectors are large enough before accessing
+				if (result.telcounts.size() > mergedrs.telcounts.size()) {
+					mergedrs.telcounts.resize(result.telcounts.size(), 0);
+				}
+				if (result.gccounts.size() > mergedrs.gccounts.size()) {
+					mergedrs.gccounts.resize(result.gccounts.size(), 0);
+				}
+
 				for (std::size_t j = 0, max = result.telcounts.size(); j != max; ++j){
 					mergedrs.telcounts[j] += result.telcounts[j]* result.numTotal;
 				}
@@ -939,7 +1061,7 @@ int outputresults(std::vector< std::map<std::string, ScanResults> > resultlist){
 				}
 				continue;
 			}else{
-				printout(rg, result, pWriter);
+				printout(rg, result, pWriter, max_telcounts_size);
 			}
 		}
 
@@ -959,7 +1081,7 @@ int outputresults(std::vector< std::map<std::string, ScanResults> > resultlist){
 
 			mergedrs.numTotal  /= resultmap.size();
 
-			printout(grpnames, mergedrs, pWriter);
+			printout(grpnames, mergedrs, pWriter, max_telcounts_size);
 		};
 	}
 
@@ -969,7 +1091,7 @@ int outputresults(std::vector< std::map<std::string, ScanResults> > resultlist){
 	return 0;
 }
 
-double calcTelLength(ScanResults results){
+double calcTelLength(const ScanResults& results){
 
 	float acc = 0;
 	for(std::size_t i=opt::tel_k, max = results.telcounts.size(); i !=max; ++i){
