@@ -62,6 +62,7 @@ static const char *TELSEQ_USAGE_MESSAGE =
 "                            the total number of reads in read group. Default is to output each readgroup separately.\n"
 "   -u                       ignore read groups. Treat all reads in file as if they were from a same read group.\n"
 "   -U                       process ONLY unmapped reads and exit. Requires index file. Useful for quick unmapped read analysis.\n"
+"   -M                       skip unmapped reads, process ONLY mapped reads. Requires index file.\n"
 "   -k                       threshold of the amount of TTAGGG/CCCTAA repeats in read for a read to be considered telomeric. default = 7.\n"
 "\nTesting functions\n------------\n"
 "   -r                       read length. default = 100\n"
@@ -84,6 +85,7 @@ namespace opt
     static bool mergerg = false;
     static bool ignorerg = false;
     static bool unmappedonly = false; // process only unmapped reads and exit
+    static bool mappedonly = false; // skip unmapped reads, process only mapped reads
     static bool onebam = false; // whether to consider all bams as one bam
     static int tel_k= ScanParameters::TEL_MOTIF_CUTOFF;
     static std::string unknown = "UNKNOWN";
@@ -117,7 +119,7 @@ bool isCRAM(const std::string& path) {
     return false;
 }
 
-static const char* shortopts = "f:o:i:k:z:e:r:p:j:T:HhvmuwU";
+static const char* shortopts = "f:o:i:k:z:e:r:p:j:T:HhvmuwUM";
 
 enum { OPT_HELP = 1, OPT_VERSION };
 
@@ -534,35 +536,40 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
     std::vector<std::future<std::map<std::string, ScanResults>>> chromFutures;
     chromFutures.reserve(threads_per_chrom);
 
-    // Process unmapped reads first (tid = -1)
-    {
-      std::lock_guard<std::mutex> lock(output_mutex);
+    // Process unmapped reads first (tid = -1) unless in mapped-only mode
+    if (!opt::mappedonly) {
+      {
+        std::lock_guard<std::mutex> lock(output_mutex);
+        if (opt::unmappedonly) {
+          std::cerr << "Processing ONLY unmapped reads (unmapped-only mode)...\n";
+        } else {
+          std::cerr << "Processing unmapped reads first...\n";
+        }
+      }
+      chromFutures.push_back(std::async(std::launch::async,
+          processChromosome, bampath, -1, "*", isExome, rggroups, resultmap));
+
+      // Wait for unmapped reads to complete
+      auto unmappedResult = chromFutures.front().get();
+      for (const auto& pair : unmappedResult) {
+        const std::string& rg = pair.first;
+        if (resultmap.find(rg) != resultmap.end()) {
+          add_results(resultmap[rg], pair.second);
+        }
+      }
+      chromFutures.clear();
+
+      // If unmapped-only mode, skip chromosome processing
       if (opt::unmappedonly) {
-        std::cerr << "Processing ONLY unmapped reads (unmapped-only mode)...\n";
-      } else {
-        std::cerr << "Processing unmapped reads first...\n";
+        // Don't clean up - child threads have their own copies and htslib may share internal structures
+        std::lock_guard<std::mutex> lock(output_mutex);
+        std::cerr << "Unmapped-only mode: Skipping mapped chromosome processing.\n";
+        std::cerr << "Completed scanning BAM (unmapped reads only)\n";
+        return resultmap;
       }
-    }
-    chromFutures.push_back(std::async(std::launch::async,
-        processChromosome, bampath, -1, "*", isExome, rggroups, resultmap));
-
-    // Wait for unmapped reads to complete
-    auto unmappedResult = chromFutures.front().get();
-    for (const auto& pair : unmappedResult) {
-      const std::string& rg = pair.first;
-      if (resultmap.find(rg) != resultmap.end()) {
-        add_results(resultmap[rg], pair.second);
-      }
-    }
-    chromFutures.clear();
-
-    // If unmapped-only mode, skip chromosome processing
-    if (opt::unmappedonly) {
-      // Don't clean up - child threads have their own copies and htslib may share internal structures
+    } else {
       std::lock_guard<std::mutex> lock(output_mutex);
-      std::cerr << "Unmapped-only mode: Skipping mapped chromosome processing.\n";
-      std::cerr << "Completed scanning BAM (unmapped reads only)\n";
-      return resultmap;
+      std::cerr << "Mapped-only mode: Skipping unmapped reads processing.\n";
     }
 
     // Now process mapped chromosomes in parallel
@@ -1028,6 +1035,8 @@ void parseScanOptions(int argc, char** argv)
                 opt::ignorerg = true; break;
             case 'U':
                 opt::unmappedonly = true; break;
+            case 'M':
+                opt::mappedonly = true; break;
             case 'w':
                 opt::onebam = true; break;
             case 'h':
