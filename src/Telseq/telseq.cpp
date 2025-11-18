@@ -23,6 +23,7 @@
 // Use htslib instead of BamTools for URL streaming support
 #include <htslib/sam.h>
 #include <htslib/hts.h>
+#include <htslib/hfile.h>
 
 //
 // Getopt
@@ -104,6 +105,18 @@ bool isURL(const std::string& path) {
             path.find("s3://") == 0);
 }
 
+// Helper function to check if a file is CRAM format
+bool isCRAM(const std::string& path) {
+    // Check file extension
+    if (path.size() >= 5 && path.substr(path.size() - 5) == ".cram") {
+        return true;
+    }
+    if (path.size() >= 5 && path.substr(path.size() - 5) == ".CRAM") {
+        return true;
+    }
+    return false;
+}
+
 static const char* shortopts = "f:o:i:k:z:e:r:p:j:T:HhvmuwU";
 
 enum { OPT_HELP = 1, OPT_VERSION };
@@ -179,7 +192,7 @@ void merge_results_by_readgroup(
 
 }
 
-// Process a single chromosome from a BAM file (thread-safe function)
+// Process a single chromosome using samtools (thread-safe function, works for BAM and CRAM)
 // This function is designed to be called in parallel for different chromosomes
 std::map<std::string, ScanResults> processChromosome(
     const std::string& bampath,
@@ -201,95 +214,60 @@ std::map<std::string, ScanResults> processChromosome(
     std::map<std::string, std::vector<range>::iterator> lastfound;
     std::vector<range>::iterator searchhint;
 
-    // Open BAM/CRAM file for this thread
-    samFile* sam_fp = sam_open(bampath.c_str(), "r");
-    if (sam_fp == NULL) {
+    {
         std::lock_guard<std::mutex> lock(output_mutex);
-        std::cerr << "Error: could not open file in chromosome thread: " << bampath << std::endl;
+        std::cerr << "[chromosome " << chr_name << "] Starting processing via samtools\n";
+    }
+
+    // Build samtools command to extract reads for this chromosome
+    std::string samtools_cmd;
+    if (tid == -1) {
+        // Unmapped reads - use '*' region to access via index (fast)
+        samtools_cmd = "samtools view -h \"" + bampath + "\" '*'";
+    } else {
+        // Specific chromosome
+        samtools_cmd = "samtools view -h \"" + bampath + "\" \"" + chr_name + "\"";
+    }
+
+    // Open pipe using popen
+    FILE* pipe_fp = popen(samtools_cmd.c_str(), "r");
+    if (pipe_fp == NULL) {
+        std::lock_guard<std::mutex> lock(output_mutex);
+        std::cerr << "Error: could not create samtools pipe for chromosome " << chr_name << std::endl;
         return chromResults;
     }
 
-    // Configure CRAM decoding for multi-threaded access
-    // Disable internal threading - each thread manages its own file handle independently
-    if (hts_set_threads(sam_fp, 0) != 0) {
-        std::lock_guard<std::mutex> lock(output_mutex);
-        std::cerr << "Warning: could not configure threading for " << bampath << "\n";
-    }
+    // Use samFile* directly from FILE* without htslib
+    // Read directly using standard C++ ifstream or use sam_read from FILE*
+    // Actually, let's just use sam_open with /dev/fd/N syntax
+    char fd_path[256];
+    snprintf(fd_path, sizeof(fd_path), "/dev/fd/%d", fileno(pipe_fp));
 
-    // Set minimum required fields to reduce CRAM decoding complexity
-    if (hts_set_opt(sam_fp, CRAM_OPT_REQUIRED_FIELDS,
-                    SAM_QNAME | SAM_FLAG | SAM_RNAME | SAM_POS | SAM_MAPQ |
-                    SAM_CIGAR | SAM_SEQ | SAM_QUAL) != 0) {
+    samFile* sam_fp = sam_open(fd_path, "r");
+    if (sam_fp == NULL) {
         std::lock_guard<std::mutex> lock(output_mutex);
-        std::cerr << "Warning: could not set CRAM required fields for " << bampath << "\n";
-    }
-
-    // Disable MD tag decoding to reduce complexity
-    if (hts_set_opt(sam_fp, CRAM_OPT_DECODE_MD, 0) != 0) {
-        std::lock_guard<std::mutex> lock(output_mutex);
-        std::cerr << "Warning: could not disable MD decoding for " << bampath << "\n";
+        std::cerr << "Error: could not open SAM from pipe for chromosome " << chr_name << std::endl;
+        pclose(pipe_fp);
+        return chromResults;
     }
 
     // Read header
     sam_hdr_t* header = sam_hdr_read(sam_fp);
     if (header == NULL) {
         std::lock_guard<std::mutex> lock(output_mutex);
-        std::cerr << "Error: could not read header in chromosome thread\n";
+        std::cerr << "Error: could not read header in chromosome thread for " << chr_name << std::endl;
         sam_close(sam_fp);
+        pclose(pipe_fp);
         return chromResults;
-    }
-
-    // Load index for random access (.bai for BAM, .crai for CRAM)
-    // If explicit index URL is provided, use it; otherwise auto-detect
-    hts_idx_t* idx = NULL;
-    if (!opt::bamindexurl.empty()) {
-        idx = sam_index_load2(sam_fp, bampath.c_str(), opt::bamindexurl.c_str());
-    } else {
-        idx = sam_index_load(sam_fp, bampath.c_str());
-    }
-
-    if (idx == NULL) {
-        std::lock_guard<std::mutex> lock(output_mutex);
-        std::cerr << "Warning: could not load index for " << bampath << "\n";
-        if (!opt::bamindexurl.empty()) {
-            std::cerr << "Warning: tried explicit index URL: " << opt::bamindexurl << "\n";
-        }
-        sam_hdr_destroy(header);
-        sam_close(sam_fp);
-        return chromResults;
-    }
-
-    // Create iterator for this chromosome (or unmapped reads if tid == -1)
-    hts_itr_t* iter = NULL;
-    if (tid == -1) {
-        // Query unmapped reads using HTS_IDX_NOCOOR
-        iter = sam_itr_queryi(idx, HTS_IDX_NOCOOR, 0, 0);
-    } else {
-        // Query specific chromosome
-        iter = sam_itr_queryi(idx, tid, 0, INT32_MAX);
-    }
-
-    if (iter == NULL) {
-        std::lock_guard<std::mutex> lock(output_mutex);
-        std::cerr << "Error: could not create iterator for chromosome " << chr_name << std::endl;
-        hts_idx_destroy(idx);
-        sam_hdr_destroy(header);
-        sam_close(sam_fp);
-        return chromResults;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(output_mutex);
-        std::cerr << "[chromosome " << chr_name << "] Starting processing\n";
     }
 
     // Allocate BAM alignment structure
     bam1_t* b = bam_init1();
     int nprocessed = 0;
 
-    // Iterate through reads in this chromosome
+    // Iterate through reads using sam_read1 (sequential reading from pipe)
     int ret;
-    while ((ret = sam_itr_next(sam_fp, iter, b)) >= 0) {
+    while ((ret = sam_read1(sam_fp, header, b)) >= 0) {
         // Extract read group tag
         std::string tag = opt::unknown;
         if (rggroups) {
@@ -385,10 +363,9 @@ std::map<std::string, ScanResults> processChromosome(
 
     // Clean up
     bam_destroy1(b);
-    hts_itr_destroy(iter);
-    hts_idx_destroy(idx);
     sam_hdr_destroy(header);
-    sam_close(sam_fp);
+    sam_close(sam_fp);  // This closes hfile
+    pclose(pipe_fp);    // Close the pipe
 
     {
         std::lock_guard<std::mutex> lock(output_mutex);
@@ -398,8 +375,8 @@ std::map<std::string, ScanResults> processChromosome(
     return chromResults;
 }
 
-// Process a single BAM file with chromosome-level parallel processing (thread-safe function)
-// Uses htslib for proper URL streaming support (S3, HTTP, HTTPS, FTP)
+// Process a single BAM/CRAM file with chromosome-level parallel processing (thread-safe function)
+// Uses samtools for chromosome processing (works for both BAM and CRAM)
 std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, bool isExome) {
 
   // storing results for each read group (RG tag). use
@@ -414,33 +391,12 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
     std::cerr << "Start analysing " << bampath << "\n";
   }
 
-  // Open BAM/CRAM file using htslib (supports URLs)
+  // Open BAM/CRAM file to read header (samtools handles decoding in chromosome threads)
   samFile* sam_fp = sam_open(bampath.c_str(), "r");
   if (sam_fp == NULL) {
     std::lock_guard<std::mutex> lock(output_mutex);
     std::cerr << "Error: could not open file: " << bampath << std::endl;
     return resultmap;
-  }
-
-  // Configure CRAM decoding for multi-threaded access
-  // Disable internal threading - each thread manages its own file handle independently
-  if (hts_set_threads(sam_fp, 0) != 0) {
-    std::lock_guard<std::mutex> lock(output_mutex);
-    std::cerr << "Warning: could not configure threading for " << bampath << "\n";
-  }
-
-  // Set minimum required fields to reduce CRAM decoding complexity
-  if (hts_set_opt(sam_fp, CRAM_OPT_REQUIRED_FIELDS,
-                  SAM_QNAME | SAM_FLAG | SAM_RNAME | SAM_POS | SAM_MAPQ |
-                  SAM_CIGAR | SAM_SEQ | SAM_QUAL) != 0) {
-    std::lock_guard<std::mutex> lock(output_mutex);
-    std::cerr << "Warning: could not set CRAM required fields for " << bampath << "\n";
-  }
-
-  // Disable MD tag decoding to reduce complexity
-  if (hts_set_opt(sam_fp, CRAM_OPT_DECODE_MD, 0) != 0) {
-    std::lock_guard<std::mutex> lock(output_mutex);
-    std::cerr << "Warning: could not disable MD decoding for " << bampath << "\n";
   }
 
   // Read header
@@ -620,16 +576,29 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
         tid++;
       }
 
-      // Wait for at least one task to complete before launching more
+      // Wait for ANY task to complete before launching more (keep all threads busy)
       if (chromFutures.size() >= threads_per_chrom && tid < n_targets) {
-        auto chromResult = chromFutures.front().get();
-        for (const auto& pair : chromResult) {
-          const std::string& rg = pair.first;
-          if (resultmap.find(rg) != resultmap.end()) {
-            add_results(resultmap[rg], pair.second);
+        // Check all futures to find one that's ready (don't just wait for the first one!)
+        bool found_ready = false;
+        for (auto it = chromFutures.begin(); it != chromFutures.end(); ++it) {
+          if (it->wait_for(std::chrono::milliseconds(10)) == std::future_status::ready) {
+            // This future is ready - collect its results
+            auto chromResult = it->get();
+            for (const auto& pair : chromResult) {
+              const std::string& rg = pair.first;
+              if (resultmap.find(rg) != resultmap.end()) {
+                add_results(resultmap[rg], pair.second);
+              }
+            }
+            chromFutures.erase(it);
+            found_ready = true;
+            break;
           }
         }
-        chromFutures.erase(chromFutures.begin());
+        // If no future is ready yet, wait a bit before checking again
+        if (!found_ready) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
       }
     }
 
