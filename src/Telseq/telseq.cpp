@@ -209,10 +209,25 @@ std::map<std::string, ScanResults> processChromosome(
         return chromResults;
     }
 
-    // Enable htslib threading for CRAM decompression (important for CRAM files)
-    if (hts_set_threads(sam_fp, 1) != 0) {
+    // Configure CRAM decoding for multi-threaded access
+    // Disable internal threading - each thread manages its own file handle independently
+    if (hts_set_threads(sam_fp, 0) != 0) {
         std::lock_guard<std::mutex> lock(output_mutex);
-        std::cerr << "Warning: could not set htslib threads for " << bampath << "\n";
+        std::cerr << "Warning: could not configure threading for " << bampath << "\n";
+    }
+
+    // Set minimum required fields to reduce CRAM decoding complexity
+    if (hts_set_opt(sam_fp, CRAM_OPT_REQUIRED_FIELDS,
+                    SAM_QNAME | SAM_FLAG | SAM_RNAME | SAM_POS | SAM_MAPQ |
+                    SAM_CIGAR | SAM_SEQ | SAM_QUAL) != 0) {
+        std::lock_guard<std::mutex> lock(output_mutex);
+        std::cerr << "Warning: could not set CRAM required fields for " << bampath << "\n";
+    }
+
+    // Disable MD tag decoding to reduce complexity
+    if (hts_set_opt(sam_fp, CRAM_OPT_DECODE_MD, 0) != 0) {
+        std::lock_guard<std::mutex> lock(output_mutex);
+        std::cerr << "Warning: could not disable MD decoding for " << bampath << "\n";
     }
 
     // Read header
@@ -407,10 +422,25 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
     return resultmap;
   }
 
-  // Enable htslib threading for CRAM decompression (important for CRAM files)
-  if (hts_set_threads(sam_fp, 1) != 0) {
+  // Configure CRAM decoding for multi-threaded access
+  // Disable internal threading - each thread manages its own file handle independently
+  if (hts_set_threads(sam_fp, 0) != 0) {
     std::lock_guard<std::mutex> lock(output_mutex);
-    std::cerr << "Warning: could not set htslib threads for " << bampath << "\n";
+    std::cerr << "Warning: could not configure threading for " << bampath << "\n";
+  }
+
+  // Set minimum required fields to reduce CRAM decoding complexity
+  if (hts_set_opt(sam_fp, CRAM_OPT_REQUIRED_FIELDS,
+                  SAM_QNAME | SAM_FLAG | SAM_RNAME | SAM_POS | SAM_MAPQ |
+                  SAM_CIGAR | SAM_SEQ | SAM_QUAL) != 0) {
+    std::lock_guard<std::mutex> lock(output_mutex);
+    std::cerr << "Warning: could not set CRAM required fields for " << bampath << "\n";
+  }
+
+  // Disable MD tag decoding to reduce complexity
+  if (hts_set_opt(sam_fp, CRAM_OPT_DECODE_MD, 0) != 0) {
+    std::lock_guard<std::mutex> lock(output_mutex);
+    std::cerr << "Warning: could not disable MD decoding for " << bampath << "\n";
   }
 
   // Read header
