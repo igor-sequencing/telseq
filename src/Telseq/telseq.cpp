@@ -41,31 +41,31 @@ static const char *TELSEQ_USAGE_MESSAGE =
 "Version: " PACKAGE_VERSION "\n"
 "Contact: " AUTHOR " [" PACKAGE_BUGREPORT "]\n\n"
 "Usage: " PROGRAM_BIN " [OPTION] <in.1.bam> <in.2.bam> <...> \n"
-"Scan BAM and estimate telomere length. \n"
-"   <in.bam>                 one or more BAM files to be analysed. File names can also be passed from a pipe, \n "
-"                            with each row containing one BAM path.\n"
-"   -f, --bamlist=STR        a file that contains a list of file paths of BAMs. It should has only one column, \n"
-"                            with each row a BAM file path. -f has higher priority than <in.bam>. When specified, \n"
+"Scan BAM/CRAM files and estimate telomere length. \n"
+"   <in.bam>                 one or more BAM/CRAM files to be analysed. File names can also be passed from a pipe, \n "
+"                            with each row containing one file path.\n"
+"   -f, --bamlist=STR        a file that contains a list of file paths of BAM/CRAM files. It should has only one column, \n"
+"                            with each row a file path. -f has higher priority than <in.bam>. When specified, \n"
 "                            <in.bam> are ignored.\n"
-"   -i, --bam-index=STR      URL to BAM index file (.bai). Required when using -T > 1 with S3/HTTP URLs. \n"
+"   -i, --bam-index=STR      URL to index file (.bai for BAM, .crai for CRAM). Required when using -T > 1 with S3/HTTP URLs. \n"
 "                            For local files, index is auto-detected. For URLs, you must specify the index URL.\n"
 "   -o, --output_dir=STR     output file for results. Ignored when input is from stdin, in which case output will be stdout. \n"
-"   -j, --jobs=INT           max number of BAM files to process in parallel. 0 = auto-detect cores. default = 0.\n"
-"   -T, --threads-per-file=INT  number of threads for processing reads within each BAM file (requires BAM index). default = 1.\n"
+"   -j, --jobs=INT           max number of files to process in parallel. 0 = auto-detect cores. default = 0.\n"
+"   -T, --threads-per-file=INT  number of threads for processing reads within each file (requires index). default = 1.\n"
 "   -H                       remove header line, which is printed by default.\n"
 "   -h                       print the header line only. The text can be used to attach to result files, useful\n"
 "                            when the headers of the result files are suppressed. \n"
 "   -m                       merge read groups by taking a weighted average across read groups of a sample, weighted by \n"
 "                            the total number of reads in read group. Default is to output each readgroup separately.\n"
-"   -u                       ignore read groups. Treat all reads in BAM as if they were from a same read group.\n"
-"   -U                       process ONLY unmapped reads and exit. Requires BAM index. Useful for quick unmapped read analysis.\n"
+"   -u                       ignore read groups. Treat all reads in file as if they were from a same read group.\n"
+"   -U                       process ONLY unmapped reads and exit. Requires index file. Useful for quick unmapped read analysis.\n"
 "   -k                       threshold of the amount of TTAGGG/CCCTAA repeats in read for a read to be considered telomeric. default = 7.\n"
 "\nTesting functions\n------------\n"
 "   -r                       read length. default = 100\n"
 "   -z                       use user specified pattern for searching [ATGC]*.\n"
 "   -e, --exomebed=STR       specifiy exome regions in BED format. These regions will be excluded \n"
-"   -w,                      consider BAMs in the speicfied bamlist as one single BAM. This is useful when \n"
-"                            the initial alignemt is separated for some reason, such as one for mapped and one for ummapped reads. \n"
+"   -w,                      consider files in the specified bamlist as one single file. This is useful when \n"
+"                            the initial alignment is separated for some reason, such as one for mapped and one for unmapped reads. \n"
 "   --help                   display this help and exit\n"
 
 "\nReport bugs to " PACKAGE_BUGREPORT "\n\n";
@@ -199,11 +199,11 @@ std::map<std::string, ScanResults> processChromosome(
     std::map<std::string, std::vector<range>::iterator> lastfound;
     std::vector<range>::iterator searchhint;
 
-    // Open BAM file for this thread
+    // Open BAM/CRAM file for this thread
     samFile* sam_fp = sam_open(bampath.c_str(), "r");
     if (sam_fp == NULL) {
         std::lock_guard<std::mutex> lock(output_mutex);
-        std::cerr << "Error: could not open BAM file in chromosome thread: " << bampath << std::endl;
+        std::cerr << "Error: could not open file in chromosome thread: " << bampath << std::endl;
         return chromResults;
     }
 
@@ -211,12 +211,12 @@ std::map<std::string, ScanResults> processChromosome(
     sam_hdr_t* header = sam_hdr_read(sam_fp);
     if (header == NULL) {
         std::lock_guard<std::mutex> lock(output_mutex);
-        std::cerr << "Error: could not read BAM header in chromosome thread\n";
+        std::cerr << "Error: could not read header in chromosome thread\n";
         sam_close(sam_fp);
         return chromResults;
     }
 
-    // Load BAM index for random access
+    // Load index for random access (.bai for BAM, .crai for CRAM)
     // If explicit index URL is provided, use it; otherwise auto-detect
     hts_idx_t* idx = NULL;
     if (!opt::bamindexurl.empty()) {
@@ -227,7 +227,7 @@ std::map<std::string, ScanResults> processChromosome(
 
     if (idx == NULL) {
         std::lock_guard<std::mutex> lock(output_mutex);
-        std::cerr << "Warning: could not load BAM index for " << bampath << "\n";
+        std::cerr << "Warning: could not load index for " << bampath << "\n";
         if (!opt::bamindexurl.empty()) {
             std::cerr << "Warning: tried explicit index URL: " << opt::bamindexurl << "\n";
         }
@@ -388,14 +388,14 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
 
   {
     std::lock_guard<std::mutex> lock(output_mutex);
-    std::cerr << "Start analysing BAM " << bampath << "\n";
+    std::cerr << "Start analysing " << bampath << "\n";
   }
 
-  // Open BAM file using htslib (supports URLs)
+  // Open BAM/CRAM file using htslib (supports URLs)
   samFile* sam_fp = sam_open(bampath.c_str(), "r");
   if (sam_fp == NULL) {
     std::lock_guard<std::mutex> lock(output_mutex);
-    std::cerr << "Error: could not open BAM file: " << bampath << std::endl;
+    std::cerr << "Error: could not open file: " << bampath << std::endl;
     return resultmap;
   }
 
@@ -403,7 +403,7 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
   sam_hdr_t* header = sam_hdr_read(sam_fp);
   if (header == NULL) {
     std::lock_guard<std::mutex> lock(output_mutex);
-    std::cerr << "Error: could not read BAM header from: " << bampath << std::endl;
+    std::cerr << "Error: could not read header from: " << bampath << std::endl;
     sam_close(sam_fp);
     return resultmap;
   }
@@ -496,7 +496,8 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
     chr_names.push_back(std::string(header->target_name[i]));
   }
 
-  // Check if BAM index is available (required for parallel processing)
+  // Check if index is available (required for parallel processing)
+  // .bai for BAM, .crai for CRAM
   hts_idx_t* test_idx = NULL;
   if (!opt::bamindexurl.empty()) {
     test_idx = sam_index_load2(sam_fp, bampath.c_str(), opt::bamindexurl.c_str());
@@ -506,11 +507,11 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
 
   if (test_idx == NULL) {
     std::lock_guard<std::mutex> lock(output_mutex);
-    std::cerr << "Error: BAM index (.bai) not found for " << bampath << "\n";
+    std::cerr << "Error: Index file (.bai for BAM, .crai for CRAM) not found for " << bampath << "\n";
     if (!opt::bamindexurl.empty()) {
       std::cerr << "Error: Explicit index URL was provided: " << opt::bamindexurl << "\n";
     }
-    std::cerr << "Error: BAM index is required. Please index your BAM file using 'samtools index'.\n";
+    std::cerr << "Error: Index file is required. Please index your file using 'samtools index'.\n";
     std::cerr << "Error: For S3/HTTP URLs, use -i/--bam-index to specify the index URL.\n";
     sam_hdr_destroy(header);
     sam_close(sam_fp);
@@ -519,7 +520,7 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
 
   {
     std::lock_guard<std::mutex> lock(output_mutex);
-    std::cerr << "BAM index found. Using " << threads_per_chrom << " threads for chromosome-level parallel processing\n";
+    std::cerr << "Index found. Using " << threads_per_chrom << " threads for chromosome-level parallel processing\n";
   }
 
   // Parallel chromosome processing
@@ -638,9 +639,9 @@ int scanBam()
   bool isExome = opt::exomebedfile.size()==0? false: true;
 
   std::cout << opt::bamlist << "\n";
-  std::cout << opt::bamlist.size() << " BAMs" <<  std::endl;
+  std::cout << opt::bamlist.size() << " files" <<  std::endl;
 
-  // Check for URLs in the BAM list
+  // Check for URLs in the file list
   bool has_urls = false;
   for (const auto& bam : opt::bamlist) {
     if (isURL(bam)) {
@@ -649,7 +650,7 @@ int scanBam()
     }
   }
 
-  // Determine the number of parallel BAM files to process
+  // Determine the number of parallel files to process
   unsigned int parallel_files = opt::parallel_files;
   unsigned int max_threads = std::thread::hardware_concurrency();
 
@@ -668,13 +669,13 @@ int scanBam()
     parallel_files = max_threads;
   }
 
-  std::cerr << "Processing up to " << parallel_files << " BAM files in parallel\n";
+  std::cerr << "Processing up to " << parallel_files << " files in parallel\n";
   if (opt::threads_per_file > 1) {
-    std::cerr << "Using " << opt::threads_per_file << " threads per BAM file for read processing\n";
+    std::cerr << "Using " << opt::threads_per_file << " threads per file for read processing\n";
   }
 
   if (has_urls) {
-    std::cerr << "Note: BAM files will be streamed from URLs. BamTools supports http://, https://, and ftp:// URLs.\n";
+    std::cerr << "Note: Files will be streamed from URLs. htslib supports http://, https://, ftp://, and s3:// URLs.\n";
   }
 
   // Process BAM files in parallel using thread pool
