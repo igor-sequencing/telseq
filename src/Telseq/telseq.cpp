@@ -209,6 +209,12 @@ std::map<std::string, ScanResults> processChromosome(
         return chromResults;
     }
 
+    // Enable htslib threading for CRAM decompression (important for CRAM files)
+    if (hts_set_threads(sam_fp, 1) != 0) {
+        std::lock_guard<std::mutex> lock(output_mutex);
+        std::cerr << "Warning: could not set htslib threads for " << bampath << "\n";
+    }
+
     // Read header
     sam_hdr_t* header = sam_hdr_read(sam_fp);
     if (header == NULL) {
@@ -399,6 +405,12 @@ std::map<std::string, ScanResults> processSingleBam(const std::string& bampath, 
     std::lock_guard<std::mutex> lock(output_mutex);
     std::cerr << "Error: could not open file: " << bampath << std::endl;
     return resultmap;
+  }
+
+  // Enable htslib threading for CRAM decompression (important for CRAM files)
+  if (hts_set_threads(sam_fp, 1) != 0) {
+    std::lock_guard<std::mutex> lock(output_mutex);
+    std::cerr << "Warning: could not set htslib threads for " << bampath << "\n";
   }
 
   // Read header
