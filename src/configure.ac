@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.69])
-AC_INIT([TelSeq], [0.0.1], [zhihao.ding@gmail.com])
+AC_INIT([TelSeq], [0.1.0], [igor@sequencing.com])
 AM_INIT_AUTOMAKE(foreign)
 AC_CONFIG_SRCDIR([Telseq/telseq.cpp])
 AC_CONFIG_HEADERS([config.h])

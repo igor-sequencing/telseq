@@ -29,17 +29,19 @@
 //
 
 #define PROGRAM_BIN "telseq"
-#define AUTHOR "Zhihao Ding"
+#define ORIGINAL_AUTHOR "Zhihao Ding"
+#define MAINTAINER "Igor Tolstoy"
 
 static const char *TELSEQ_VERSION_MESSAGE =
 "TelSeq Version " PACKAGE_VERSION "\n"
-"Written by " AUTHOR ".\n"
-"Copyright 2013 Wellcome Trust Sanger Institute\n" ;
+"Originally written by " ORIGINAL_AUTHOR ".\n"
+"Copyright 2013 Wellcome Trust Sanger Institute\n"
+"Maintained by " MAINTAINER " <" PACKAGE_BUGREPORT ">\n" ;
 
 static const char *TELSEQ_USAGE_MESSAGE =
 "Program: " PACKAGE_NAME "\n"
 "Version: " PACKAGE_VERSION "\n"
-"Contact: " AUTHOR " [" PACKAGE_BUGREPORT "]\n\n"
+"Contact: " MAINTAINER " [" PACKAGE_BUGREPORT "]\n\n"
 "Usage: " PROGRAM_BIN " [OPTION] <in.1.bam> <in.2.bam> <...> \n"
 "Scan BAM/CRAM files and estimate telomere length. \n"
 "   <in.bam>                 one or more BAM/CRAM files to be analysed. File names can also be passed from a pipe, \n "
